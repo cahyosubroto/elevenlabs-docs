@@ -1,0 +1,296 @@
+---
+title: "How to Use Projects API (Python SDK)"
+sidebarTitle: "How to use projects API"
+description: "How to use projects API for generating text-to-speech in longer form of content."
+icon: "code"
+---
+
+In this tutorial, you'll learn how to generate text-to-speech with projects API on the ElevenLabs Python SDK. This API is suitable for longer forms of content, like an ebook, documents, or long texts for generating audiobooks, voiceovers, and many more. This API can better understand the content's context, thus improving the consistency and voice quality. However, this API is only available on **Enterprises Plan**. Visit [our page for enterprise plan](https://elevenlabs.io/enterprise) or contact [our team](https://elevenlabs.io/contact-sales) to get access to this API.
+
+The current limitation of this API is it is not yet able to create chapters.
+
+In the tutorial, we will create a project to convert a sample of long-form content, including text files, PDF documents, and ePUB documents. The code will demonstrate the process from creating a project, beginning conversion, waiting for the conversion process, until saving the file locally and uploading the result to the S3 bucket. We'll also demonstrate the usage of a custom pronunciation dictionary. Visit [this article](https://elevenlabs.io/docs/api-reference/how-to-use-pronunciation-dictionaries) for more information about pronunciation dictionaries.
+
+## Requirements
+
+- An ElevenLabs account with an API key and enterprise plan (here’s how to [find your API key](/api-reference/text-to-speech#authentication)).
+- Python installed on your machine
+- AWS S3 Bucket credentials (optional)
+
+## Setup
+
+### Installing our SDK
+
+Before you begin, make sure you have installed the necessary SDKs and libraries. You will need the ElevenLabs SDK to interact with ElevenLabs APIs. You can install it using pip:
+
+```bash
+pip install elevenlabs
+```
+
+Additionally, install `python-dotenv` to manage your environmental variables:
+
+```bash
+pip install python-dotenv
+```
+
+If you want to upload the result to the AWS S3 bucket, we need to install an additional `boto3` library to interact with AWS S3 APIs.
+
+```bash
+pip install boto3
+```
+
+Next, copy `.env.example` file to `.env` in your project directory and fill it with your credentials like so:
+
+```
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+AWS_ACCESS_KEY_ID=your_aws_access_key_id
+AWS_SECRET_ACCESS_KEY=your_aws_secret_key
+AWS_REGION_NAME=your_aws_region_name
+AWS_S3_BUCKET_NAME=your_aws_s3_bucket_name
+```
+
+## Initiate the Client SDK
+
+We'll start by initializing the client SDK.
+
+```python
+import os
+from elevenlabs.client import ElevenLabs
+
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+
+client = ElevenLabs(
+    api_key=ELEVENLABS_API_KEY,
+)
+```
+
+## Create a Project and Add Our Document
+
+In the following snippet, we will create a new project and include our document in that project. We provide three kinds of examples, which are a text file, PDF file, and ePUB file. Please check the `document` folder to see the example content.
+
+First, we define the filename and type of our document then call the `add` method in the projects module. This method only creates the project and stores the document. The text-to-speech generation process is different and we need to manually call it by ourselves. The method also supports creating a blank project if no document is provided. The method also supports documents from a URL instead of a file.
+
+### For Text File
+
+```python
+filename = "sample.txt"
+mime_type = "text/plain"
+```
+
+### For PDF File
+
+```python
+filename = "sample.pdf"
+mime_type = "application/pdf"
+```
+
+### For Text File
+
+```python
+filename = "sample.epub"
+mime_type = "application/epub+zip"
+```
+
+```python
+f = open(f"document/{filename}", "rb")
+
+add_project_response = client.projects.add(
+    name="example",
+    from_document=(filename, f.read(), mime_type),
+    default_model_id="eleven_turbo_v2",
+    default_title_voice_id="21m00Tcm4TlvDq8ikWAM", # voice id for rachel
+    default_paragraph_voice_id="21m00Tcm4TlvDq8ikWAM" # voice id for rachel
+)
+
+f.close()
+```
+
+## Update our Pronunciation Dictionary (Optional)
+
+This step is optional. A pronunciation dictionary is used to change how words are pronunciated. Please refer to [this article](https://elevenlabs.io/docs/api-reference/how-to-use-pronunciation-dictionaries) for more information.
+
+The following snippet will create a new pronunciation dictionary from the file and add it to our project pronunciation dictionary. Check `dictionary.pls` to see our custom rule for this example.
+
+```python
+from elevenlabs import (
+    PronunciationDictionaryVersionLocator
+)
+
+# add a custom pronunciation dictionary
+pronunciation_dictionary = client.pronunciation_dictionary.add_from_file(
+        file=f_dict.read(), name="example"
+)
+
+f_dict.close()
+
+project_id = add_project_response.project.project_id
+
+# add the pronunciation dictionary to our project
+client.projects.update_pronunciation_dictionaries(project_id=project_id, 
+    pronunciation_dictionary_locators=[
+        PronunciationDictionaryVersionLocator(
+                    pronunciation_dictionary_id=pronunciation_dictionary.id,
+                    version_id=pronunciation_dictionary.version_id
+        )
+])
+```
+
+## Begin Conversion Process
+
+To begin the conversion, the process is simple: call the convert method. This process is asynchronous, so we need to regularly check the conversion process to wait for the conversion to be completed.
+
+```python
+client.projects.convert(project_id=project_id)
+```
+
+## Check for Conversion Process
+
+As we've mentioned before, we need to periodically check the progress. This snippet will first check whether the project can be downloaded. If so, we will get a list of available snapshots. Otherwise, we'll wait for 10 seconds before sending another request.
+
+```python
+from time import sleep
+
+is_completed = False
+can_be_downloaded = False
+snapshot: ProjectSnapshotResponse = None
+project_info: ProjectExtendedResponseModel = None
+
+# wait for snapshot
+while not is_completed:
+    if not can_be_downloaded:
+        sleep(10)
+        print("Checking if the project can be downloaded ...")
+        project_info = client.projects.get(project_id)
+        
+        if project_info.can_be_downloaded:
+            print(f"Project info {project_info.dict()}")
+            can_be_downloaded = True
+        else:
+            print(f"Waiting for 10 seconds ...")
+    else:
+        get_snapshots_response = client.projects.get_snapshots(project_id=project_id)
+        
+        if len(get_snapshots_response.snapshots) != 0:
+            is_completed = True
+            print(f"Snapshot found")
+            snapshot = get_snapshots_response.snapshots[0]
+        else:
+            print(f"Waiting for 10 seconds ...")
+            # wait for 10 seconds before checking the conversion progress
+            sleep(10)
+```
+
+## Stream the Result
+
+After we've got the snippet version, we can request to stream the audio. The snippet will stream audio and save it into our audio stream.
+
+```python
+from io import BytesIO
+
+response = client.projects.stream_audio(snapshot.project_id, snapshot.project_snapshot_id)
+
+# Create a BytesIO object to hold audio data
+audio_stream = BytesIO()
+
+# Write each chunk of audio data to the stream
+for chunk in response:
+    if chunk:
+        audio_stream.write(chunk)
+
+# Reset stream position to the beginning
+audio_stream.seek(0)
+```
+
+## Save to File
+
+To save the audio stream to a file, just call the save method from our SDK.
+
+```python
+from elevenlabs import (
+    save
+)
+
+save(audio_stream.read(), "example.mp3")
+```
+
+## Save to AWS S3
+
+To save the audio stream to AWS S3, first, we need to define a method for saving the file to S3 and a method to generate a temporary URL for us to access the file. After that, we call those methods to save the file to AWS S3.
+
+```python
+AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
+AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
+AWS_REGION_NAME = os.getenv("AWS_REGION_NAME")
+AWS_S3_BUCKET_NAME = os.getenv("AWS_S3_BUCKET_NAME")
+
+if (
+    not AWS_ACCESS_KEY_ID
+    or not AWS_SECRET_ACCESS_KEY
+    or not AWS_REGION_NAME
+    or not AWS_S3_BUCKET_NAME
+):
+    raise ValueError("AWS Environment variables not set properly")
+
+session = boto3.Session(
+    aws_access_key_id=AWS_ACCESS_KEY_ID,
+    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+    region_name=AWS_REGION_NAME,
+)
+
+s3 = session.client("s3")
+
+
+def generate_presigned_url(s3_file_name: str) -> str:
+    """
+    Generates a presigned URL for an S3 object allowing temporary access without AWS credentials.
+
+    Args:
+        s3_file_name (str): The key name of the S3 object for which to generate the presigned URL.
+
+    Returns:
+        str: The generated presigned URL as a string.
+    """
+    signed_url = s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": AWS_S3_BUCKET_NAME, "Key": s3_file_name},
+        ExpiresIn=3600,  # expires in 1 hour
+    )
+    return signed_url
+
+
+def upload_audiostream_to_s3(audio_stream) -> str:
+    """
+    Uploads an audio stream to an S3 bucket.
+
+    Args:
+        audio_stream: The audio stream (file-like object) to be uploaded.
+
+    Returns:
+        str: The unique S3 file name under which the audio stream was saved.
+    """
+    s3_file_name = f"{uuid.uuid4()}.mp3"  # Generates a unique file name using UUID
+    s3.upload_fileobj(audio_stream, AWS_S3_BUCKET_NAME, s3_file_name)
+
+    return s3_file_name
+```
+
+Then, we save the stream to AWS S3.
+
+```python
+s3_filename = upload_audiostream_to_s3(audio_stream)
+presigned_url = generate_presigned_url(s3_filename)
+print(f"Signed URL to access the file: {presigned_url}")
+```
+
+## Conclusion
+
+You know how to use projects API for generating text-to-speech audio in longer forms of content, such as text files, PDF documents, and ePUB files. These functionalities open up opportunities to generate voices that are more context-aware and consistent, making them suitable for use cases such as audiobooks, voiceover, etc.
+
+For more details, visit our [example repo](https://github.com/elevenlabs/elevenlabs-examples/tree/main/projec/examples/projects/python) to see the full project files which give a clear structure for setting up your application.
+
+- `env.example`: Template for your environment variables.
+- `document`: Folder that contains `example.txt`, `example.pdf`, and `example.epub` that is used as the example document.
+- `main.py`: The complete code for snippets above except the AWS S3 helper function.
+- `s3_uploader.py`: The code for AWS S3 helper functions.
+- `dictionary.pls`: Custom dictionary example with XML format.
+- `requirements.txt`: List of Python packages used for this example.
